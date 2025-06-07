@@ -1,4 +1,4 @@
-package maintenance
+package traefik_maintenance_plugin
 
 import (
 	"context"
