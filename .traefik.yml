@@ -1,0 +1,11 @@
+displayName: N2F Maintenance Plugin
+type: middleware
+
+import: github.com/n2jsoft-public-org/traefik-maintenance-plugin
+
+summary: Activate maintenance mode with redirect and bypass IP
+
+testData:
+  redirectUrl: "https://google.com"
+  allowedIPs:
+    - "1.1.1.1"

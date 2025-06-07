@@ -1,0 +1,40 @@
+version: '3.8'
+
+services:
+  traefik:
+    image: traefik:v3.0
+    command:
+      - "--api.insecure=true"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entryPoints.web.address=:80"
+      - "--accesslog=true"
+      - "--experimental.localPlugins.maintenance.moduleName=github.com/n2jsoft-public-org/traefik-maintenance-plugin"
+    restart: unless-stopped
+    ports:
+      - 80:80
+      - 8080:8080
+    networks:
+      - web
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./:/plugins-local/src/github.com/n2jsoft-public-org/traefik-maintenance-plugin
+
+  test:
+    image: nginx:stable-alpine
+    restart: unless-stopped
+    ports:
+      - 8081:80
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.test.rule=Host(`maintenance.local`)"
+      - "traefik.http.routers.test.entrypoints=web"
+      - "traefik.http.routers.test.middlewares=maintenance@docker"
+    volumes:
+      - ./test:/usr/share/nginx/html
+    networks:
+      - web
+
+networks:
+  web:
+    external: true
