@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -107,7 +108,36 @@ func (i *IPWhitelistRedirect) ServeHTTP(rw http.ResponseWriter, req *http.Reques
 		"plugin", i.name,
 		"clientIP", clientIP.String(),
 		"redirectURL", i.redirectURL)
-	http.Redirect(rw, req, i.redirectURL, http.StatusFound)
+
+	newReq, err := http.NewRequestWithContext(req.Context(), http.MethodGet, i.redirectURL, nil)
+	if err != nil {
+		i.logger.Error("Failed to create new request for redirectURL",
+			"plugin", i.name, "error", err)
+		http.Error(rw, "Unable to create redirect request", http.StatusInternalServerError)
+		return
+	}
+	resp, err := http.DefaultClient.Do(newReq)
+	if err != nil {
+		i.logger.Error("Failed to fetch redirectURL content",
+			"plugin", i.name, "error", err)
+		http.Error(rw, "Unable to fetch alternate content", http.StatusInternalServerError)
+		return
+	}
+	defer func() {
+		err := resp.Body.Close()
+		if err != nil {
+			i.logger.Error("Failed to close response body",
+				"plugin", i.name, "error", err)
+		}
+	}()
+	rw.WriteHeader(resp.StatusCode)
+	_, err = io.Copy(rw, resp.Body)
+	if err != nil {
+		i.logger.Error("Failed to write response body",
+			"plugin", i.name, "error", err)
+		http.Error(rw, "Unable to write response", http.StatusInternalServerError)
+		return
+	}
 }
 
 func (i *IPWhitelistRedirect) getClientIP(req *http.Request) net.IP {
