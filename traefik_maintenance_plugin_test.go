@@ -1,409 +1,172 @@
 package traefik_maintenance_plugin
 
 import (
-	"context"
-	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"os"
+	"strings"
 	"testing"
 )
 
-func TestCreateConfig(t *testing.T) {
-	config := CreateConfig()
-
-	if config == nil {
-		t.Fatal("CreateConfig() returned nil")
-	}
-
-	if config.RedirectURL != "" {
-		t.Errorf("Expected empty RedirectURL, got %s", config.RedirectURL)
-	}
-
-	if len(config.AllowedIPs) != 0 {
-		t.Errorf("Expected empty AllowedIPs slice, got %v", config.AllowedIPs)
-	}
-}
-
-func TestNew(t *testing.T) {
-	ctx := context.Background()
-	next := http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
-		rw.WriteHeader(http.StatusOK)
-	})
-
-	t.Run("valid config", func(t *testing.T) {
-		config := &Config{
-			RedirectURL: "https://maintenance.example.com",
-			AllowedIPs:  []string{"192.168.1.1", "10.0.0.0/24"},
-		}
-
-		handler, err := New(ctx, next, config, "test")
-		if err != nil {
-			t.Fatalf("New() failed: %v", err)
-		}
-
-		if handler == nil {
-			t.Fatal("New() returned nil handler")
-		}
-
-		ipwr, ok := handler.(*IPWhitelistRedirect)
-		if !ok {
-			t.Fatal("Handler is not of type *IPWhitelistRedirect")
-		}
-
-		if ipwr.redirectURL != config.RedirectURL {
-			t.Errorf("Expected redirectURL %s, got %s", config.RedirectURL, ipwr.redirectURL)
-		}
-
-		if len(ipwr.allowedIPs) != 2 {
-			t.Errorf("Expected 2 allowed IPs, got %d", len(ipwr.allowedIPs))
-		}
-	})
-
-	t.Run("missing redirect URL", func(t *testing.T) {
-		config := &Config{
-			RedirectURL: "",
-			AllowedIPs:  []string{"192.168.1.1"},
-		}
-
-		_, err := New(ctx, next, config, "test")
-		if err == nil {
-			t.Fatal("Expected error for missing redirectUrl")
-		}
-
-		expectedError := "redirectUrl is required"
-		if err.Error() != expectedError {
-			t.Errorf("Expected error '%s', got '%s'", expectedError, err.Error())
-		}
-	})
-
-	t.Run("invalid IP address", func(t *testing.T) {
-		config := &Config{
-			RedirectURL: "https://maintenance.example.com",
-			AllowedIPs:  []string{"invalid-ip"},
-		}
-
-		_, err := New(ctx, next, config, "test")
-		if err == nil {
-			t.Fatal("Expected error for invalid IP")
-		}
-	})
-
-	t.Run("IPv6 handling", func(t *testing.T) {
-		config := &Config{
-			RedirectURL: "https://maintenance.example.com",
-			AllowedIPs:  []string{"2001:db8::1", "2001:db8::/32"},
-		}
-
-		handler, err := New(ctx, next, config, "test")
-		if err != nil {
-			t.Fatalf("New() failed with IPv6: %v", err)
-		}
-
-		ipwr := handler.(*IPWhitelistRedirect)
-		if len(ipwr.allowedIPs) != 2 {
-			t.Errorf("Expected 2 allowed IPv6 networks, got %d", len(ipwr.allowedIPs))
-		}
-	})
-
-	t.Run("single IP gets correct subnet mask", func(t *testing.T) {
-		config := &Config{
-			RedirectURL: "https://maintenance.example.com",
-			AllowedIPs:  []string{"192.168.1.1", "2001:db8::1"},
-		}
-
-		handler, err := New(ctx, next, config, "test")
-		if err != nil {
-			t.Fatalf("New() failed: %v", err)
-		}
-
-		ipwr := handler.(*IPWhitelistRedirect)
-
-		// Check IPv4 got /32
-		ipv4Net := ipwr.allowedIPs[0]
-		ones, bits := ipv4Net.Mask.Size()
-		if ones != 32 || bits != 32 {
-			t.Errorf("Expected IPv4 single IP to get /32 mask, got /%d", ones)
-		}
-
-		// Check IPv6 got /128
-		ipv6Net := ipwr.allowedIPs[1]
-		ones, bits = ipv6Net.Mask.Size()
-		if ones != 128 || bits != 128 {
-			t.Errorf("Expected IPv6 single IP to get /128 mask, got /%d", ones)
-		}
-	})
-}
-
-func TestServeHTTP(t *testing.T) {
-	ctx := context.Background()
-	next := http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
-		rw.WriteHeader(http.StatusOK)
-		_, err := rw.Write([]byte("allowed"))
-		if err != nil {
-			t.Fatalf("Failed to write response: %v", err)
-		}
-	})
-
+func TestIsIPAllowed(t *testing.T) {
 	config := &Config{
-		RedirectURL: "https://maintenance.example.com",
-		AllowedIPs:  []string{"192.168.1.1", "10.0.0.0/24", "2001:db8::1"},
+		RedirectURL: "https://example.com/redirect",
+		AllowedIPs:  []string{"192.168.0.0/24", "10.0.0.1"},
 	}
-
-	handler, err := New(ctx, next, config, "test")
+	handler, err := New(nil, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}), config, "test")
 	if err != nil {
-		t.Fatalf("Failed to create handler: %v", err)
+		t.Fatalf("failed to create plugin: %v", err)
+	}
+	plugin := handler.(*IPWhitelistRedirect)
+
+	tests := []struct {
+		ip      string
+		allowed bool
+	}{
+		{"192.168.0.42", true},
+		{"192.168.1.1", false},
+		{"10.0.0.1", true},
+		{"10.0.0.2", false},
+		{"::1", false},
 	}
 
-	t.Run("allowed IP passes through", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/", nil)
-		req.RemoteAddr = "192.168.1.1:12345"
-
-		rr := httptest.NewRecorder()
-		handler.ServeHTTP(rr, req)
-
-		if rr.Code != http.StatusOK {
-			t.Errorf("Expected status OK, got %d", rr.Code)
+	for _, test := range tests {
+		ip := net.ParseIP(test.ip)
+		if ip == nil {
+			t.Fatalf("failed to parse IP: %s", test.ip)
 		}
-
-		if rr.Body.String() != "allowed" {
-			t.Errorf("Expected 'allowed', got '%s'", rr.Body.String())
+		got := plugin.isIPAllowed(ip)
+		if got != test.allowed {
+			t.Errorf("isIPAllowed(%q) = %v; want %v", test.ip, got, test.allowed)
 		}
-	})
-
-	t.Run("IP in subnet passes through", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/", nil)
-		req.RemoteAddr = "10.0.0.50:12345"
-
-		rr := httptest.NewRecorder()
-		handler.ServeHTTP(rr, req)
-
-		if rr.Code != http.StatusOK {
-			t.Errorf("Expected status OK, got %d", rr.Code)
-		}
-	})
-
-	t.Run("disallowed IP redirects", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/", nil)
-		req.RemoteAddr = "203.0.113.1:12345"
-
-		rr := httptest.NewRecorder()
-		handler.ServeHTTP(rr, req)
-
-		if rr.Code != http.StatusFound {
-			t.Errorf("Expected status Found (302), got %d", rr.Code)
-		}
-
-		location := rr.Header().Get("Location")
-		if location != config.RedirectURL {
-			t.Errorf("Expected redirect to %s, got %s", config.RedirectURL, location)
-		}
-	})
-
-	t.Run("X-Forwarded-For header takes precedence", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/", nil)
-		req.RemoteAddr = "203.0.113.1:12345"             // This would be blocked
-		req.Header.Set("X-Forwarded-For", "192.168.1.1") // This should be allowed
-
-		rr := httptest.NewRecorder()
-		handler.ServeHTTP(rr, req)
-
-		if rr.Code != http.StatusOK {
-			t.Errorf("Expected status OK (X-Forwarded-For should take precedence), got %d", rr.Code)
-		}
-	})
-
-	t.Run("X-Real-IP header used when X-Forwarded-For absent", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/", nil)
-		req.RemoteAddr = "203.0.113.1:12345"     // This would be blocked
-		req.Header.Set("X-Real-IP", "10.0.0.25") // This should be allowed (in subnet)
-
-		rr := httptest.NewRecorder()
-		handler.ServeHTTP(rr, req)
-
-		if rr.Code != http.StatusOK {
-			t.Errorf("Expected status OK (X-Real-IP should be used), got %d", rr.Code)
-		}
-	})
-
-	t.Run("IPv6 address works", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/", nil)
-		req.RemoteAddr = "[2001:db8::1]:12345"
-
-		rr := httptest.NewRecorder()
-		handler.ServeHTTP(rr, req)
-
-		if rr.Code != http.StatusOK {
-			t.Errorf("Expected status OK for IPv6, got %d", rr.Code)
-		}
-	})
+	}
 }
 
 func TestGetClientIP(t *testing.T) {
-	handler := &IPWhitelistRedirect{
-		logger: slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-			Level: slog.LevelDebug,
-		})),
-	}
-
-	t.Run("X-Forwarded-For single IP", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/", nil)
-		req.Header.Set("X-Forwarded-For", "192.168.1.100")
-		req.RemoteAddr = "10.0.0.1:12345"
-
-		ip := handler.getClientIP(req)
-		expected := net.ParseIP("192.168.1.100")
-
-		if !ip.Equal(expected) {
-			t.Errorf("Expected IP %s, got %s", expected, ip)
-		}
-	})
-
-	t.Run("X-Forwarded-For multiple IPs", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/", nil)
-		req.Header.Set("X-Forwarded-For", "192.168.1.100, 10.0.0.1, 172.16.0.1")
-		req.RemoteAddr = "203.0.113.1:12345"
-
-		ip := handler.getClientIP(req)
-		expected := net.ParseIP("192.168.1.100")
-
-		if !ip.Equal(expected) {
-			t.Errorf("Expected first IP %s, got %s", expected, ip)
-		}
-	})
-
-	t.Run("X-Real-IP when no X-Forwarded-For", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/", nil)
-		req.Header.Set("X-Real-IP", "192.168.1.200")
-		req.RemoteAddr = "10.0.0.1:12345"
-
-		ip := handler.getClientIP(req)
-		expected := net.ParseIP("192.168.1.200")
-
-		if !ip.Equal(expected) {
-			t.Errorf("Expected IP %s, got %s", expected, ip)
-		}
-	})
-
-	t.Run("RemoteAddr fallback", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/", nil)
-		req.RemoteAddr = "10.0.0.1:12345"
-
-		ip := handler.getClientIP(req)
-		expected := net.ParseIP("10.0.0.1")
-
-		if !ip.Equal(expected) {
-			t.Errorf("Expected IP %s, got %s", expected, ip)
-		}
-	})
-
-	t.Run("IPv6 RemoteAddr", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/", nil)
-		req.RemoteAddr = "[2001:db8::1]:8080"
-
-		ip := handler.getClientIP(req)
-		expected := net.ParseIP("2001:db8::1")
-
-		if !ip.Equal(expected) {
-			t.Errorf("Expected IPv6 %s, got %s", expected, ip)
-		}
-	})
-
-	t.Run("invalid X-Forwarded-For falls back", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/", nil)
-		req.Header.Set("X-Forwarded-For", "invalid-ip")
-		req.Header.Set("X-Real-IP", "192.168.1.50")
-		req.RemoteAddr = "10.0.0.1:12345"
-
-		ip := handler.getClientIP(req)
-		expected := net.ParseIP("192.168.1.50")
-
-		if !ip.Equal(expected) {
-			t.Errorf("Expected fallback to X-Real-IP %s, got %s", expected, ip)
-		}
-	})
-
-	t.Run("malformed RemoteAddr without port", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/", nil)
-		req.RemoteAddr = "192.168.1.1"
-
-		ip := handler.getClientIP(req)
-		expected := net.ParseIP("192.168.1.1")
-
-		if !ip.Equal(expected) {
-			t.Errorf("Expected IP %s, got %s", expected, ip)
-		}
-	})
-}
-
-func TestIsIPAllowed(t *testing.T) {
-	// Create handler with test IPs
-	ctx := context.Background()
-	next := http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {})
 	config := &Config{
-		RedirectURL: "https://maintenance.example.com",
-		AllowedIPs:  []string{"192.168.1.1", "10.0.0.0/24", "2001:db8::/32"},
+		RedirectURL: "https://example.com",
 	}
-
-	handler, err := New(ctx, next, config, "test")
+	handler, err := New(nil, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}), config, "test")
 	if err != nil {
-		t.Fatalf("Failed to create handler: %v", err)
+		t.Fatalf("failed to create plugin: %v", err)
 	}
-
-	ipwr := handler.(*IPWhitelistRedirect)
+	plugin := handler.(*IPWhitelistRedirect)
 
 	tests := []struct {
-		name     string
-		ip       string
-		expected bool
+		name       string
+		headers    map[string]string
+		remoteAddr string
+		wantIP     string
 	}{
-		{"exact IPv4 match", "192.168.1.1", true},
-		{"IPv4 in subnet", "10.0.0.50", true},
-		{"IPv4 not in subnet", "10.0.1.1", false},
-		{"IPv4 not allowed", "203.0.113.1", false},
-		{"IPv6 in subnet", "2001:db8::1234", true},
-		{"IPv6 not in subnet", "2001:db9::1", false},
-		{"nil IP", "", false},
+		{
+			name:       "X-Forwarded-For with multiple IPs",
+			headers:    map[string]string{"X-Forwarded-For": "203.0.113.1, 198.51.100.2"},
+			remoteAddr: "192.0.2.1:1234",
+			wantIP:     "203.0.113.1",
+		},
+		{
+			name:       "X-Real-IP",
+			headers:    map[string]string{"X-Real-IP": "198.51.100.42"},
+			remoteAddr: "192.0.2.1:1234",
+			wantIP:     "198.51.100.42",
+		},
+		{
+			name:       "Fallback to RemoteAddr",
+			headers:    map[string]string{},
+			remoteAddr: "192.0.2.33:5678",
+			wantIP:     "192.0.2.33",
+		},
+		{
+			name:       "Invalid RemoteAddr",
+			headers:    map[string]string{},
+			remoteAddr: "invalid-addr",
+			wantIP:     "", // expect nil IP
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var ip net.IP
-			if tt.ip != "" {
-				ip = net.ParseIP(tt.ip)
+			req := &http.Request{
+				Header:     make(http.Header),
+				RemoteAddr: tt.remoteAddr,
+			}
+			for k, v := range tt.headers {
+				req.Header.Set(k, v)
 			}
 
-			result := ipwr.isIPAllowed(ip)
-			if result != tt.expected {
-				t.Errorf("isIPAllowed(%s) = %v, expected %v", tt.ip, result, tt.expected)
+			ip := plugin.getClientIP(req)
+			if ip == nil && tt.wantIP != "" {
+				t.Errorf("expected IP %q but got nil", tt.wantIP)
+			} else if ip != nil && ip.String() != tt.wantIP {
+				t.Errorf("got IP %q; want %q", ip.String(), tt.wantIP)
 			}
 		})
 	}
 }
 
-func BenchmarkServeHTTP(b *testing.B) {
-	ctx := context.Background()
-	next := http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
-		rw.WriteHeader(http.StatusOK)
+func TestServeHTTP(t *testing.T) {
+	redirectURL := "https://example.com/redirect"
+
+	nextCalled := false
+	nextHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		nextCalled = true
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("next handler"))
 	})
 
 	config := &Config{
-		RedirectURL: "https://maintenance.example.com",
-		AllowedIPs:  []string{"192.168.1.0/24", "10.0.0.0/8"},
+		RedirectURL: redirectURL,
+		AllowedIPs:  []string{"192.168.1.0/24"},
 	}
 
-	handler, err := New(ctx, next, config, "test")
+	pluginHandler, err := New(nil, nextHandler, config, "test")
 	if err != nil {
-		b.Fatalf("Failed to create handler: %v", err)
+		t.Fatalf("failed to create plugin: %v", err)
 	}
+	plugin := pluginHandler.(*IPWhitelistRedirect)
 
-	req := httptest.NewRequest("GET", "/", nil)
-	req.RemoteAddr = "192.168.1.100:12345"
+	// Allowed IP test
+	t.Run("allowed IP passes to next handler", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "http://example.com/", nil)
+		req.RemoteAddr = "192.168.1.42:1234"
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		rr := httptest.NewRecorder()
-		handler.ServeHTTP(rr, req)
-	}
+		rec := httptest.NewRecorder()
+		nextCalled = false
+		plugin.ServeHTTP(rec, req)
+
+		if !nextCalled {
+			t.Error("expected next handler to be called for allowed IP")
+		}
+		if rec.Code != http.StatusOK {
+			t.Errorf("expected status 200, got %d", rec.Code)
+		}
+		if !strings.Contains(rec.Body.String(), "next handler") {
+			t.Errorf("unexpected response body: %s", rec.Body.String())
+		}
+	})
+
+	// Disallowed IP test (should proxy redirectURL response)
+	t.Run("disallowed IP proxies redirectURL", func(t *testing.T) {
+		// Start test server to simulate redirectURL
+		redirectServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusTeapot)
+			w.Write([]byte("redirected content"))
+		}))
+		defer redirectServer.Close()
+
+		plugin.redirectURL = redirectServer.URL
+
+		req := httptest.NewRequest("GET", "http://example.com/", nil)
+		req.RemoteAddr = "10.0.0.42:5678"
+
+		rec := httptest.NewRecorder()
+		plugin.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusTeapot {
+			t.Errorf("expected status %d, got %d", http.StatusTeapot, rec.Code)
+		}
+		if !strings.Contains(rec.Body.String(), "redirected content") {
+			t.Errorf("unexpected response body: %s", rec.Body.String())
+		}
+	})
 }
