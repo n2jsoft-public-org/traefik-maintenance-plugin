@@ -34,7 +34,7 @@ services:
       - "traefik.http.routers.test.entrypoints=web"
       - "traefik.http.routers.test.middlewares=maintenance@docker"
       - "traefik.http.middlewares.maintenance.plugin.traefik-maintenance-plugin.mode=enabled"
-      - "traefik.http.middlewares.maintenance.plugin.traefik-maintenance-plugin.redirectUrl=https://google.com"
+      - "traefik.http.middlewares.maintenance.plugin.traefik-maintenance-plugin.redirectUrl=https://maintenance.n2f.com"
       - "traefik.http.middlewares.maintenance.plugin.traefik-maintenance-plugin.allowedIPs=0.0.0.0/0"
       - "traefik.http.middlewares.maintenance.plugin.traefik-maintenance-plugin.debug=true"
     volumes:

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -107,7 +108,18 @@ func (i *IPWhitelistRedirect) ServeHTTP(rw http.ResponseWriter, req *http.Reques
 		"plugin", i.name,
 		"clientIP", clientIP.String(),
 		"redirectURL", i.redirectURL)
-	http.Redirect(rw, req, i.redirectURL, http.StatusFound)
+
+	resp, err := http.Get(i.redirectURL)
+	if err != nil {
+		i.logger.Error("Failed to fetch redirectURL content",
+			"plugin", i.name, "error", err)
+		http.Error(rw, "Unable to fetch alternate content", http.StatusInternalServerError)
+		return
+	}
+	defer resp.Body.Close()
+	rw.WriteHeader(resp.StatusCode)
+	io.Copy(rw, resp.Body)
+	return
 }
 
 func (i *IPWhitelistRedirect) getClientIP(req *http.Request) net.IP {
