@@ -2,14 +2,17 @@ version: '3.8'
 
 services:
   traefik:
-    image: traefik:v3.0
+    image: traefik:v3.4
     command:
       - "--api.insecure=true"
+      - "--log=true"
+      - "--log.level=DEBUG"
       - "--providers.docker=true"
       - "--providers.docker.exposedbydefault=false"
       - "--entryPoints.web.address=:80"
-      - "--accesslog=true"
-      - "--experimental.localPlugins.maintenance.moduleName=github.com/n2jsoft-public-org/traefik-maintenance-plugin"
+      #- "--experimental.plugins.traefik-maintenance-plugin.modulename=github.com/n2jsoft-public-org/traefik-maintenance-plugin"
+      #- "--experimental.plugins.traefik-maintenance-plugin.version=v0.0.1"
+      - "--experimental.localPlugins.traefik-maintenance-plugin.modulename=github.com/n2jsoft-public-org/traefik-maintenance-plugin"
     restart: unless-stopped
     ports:
       - 80:80
@@ -17,8 +20,8 @@ services:
     networks:
       - web
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - ./:/plugins-local/src/github.com/n2jsoft-public-org/traefik-maintenance-plugin
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - "./:/plugins-local/src/github.com/n2jsoft-public-org/traefik-maintenance-plugin"
 
   test:
     image: nginx:stable-alpine
@@ -30,6 +33,10 @@ services:
       - "traefik.http.routers.test.rule=Host(`maintenance.local`)"
       - "traefik.http.routers.test.entrypoints=web"
       - "traefik.http.routers.test.middlewares=maintenance@docker"
+      - "traefik.http.middlewares.maintenance.plugin.traefik-maintenance-plugin.mode=enabled"
+      - "traefik.http.middlewares.maintenance.plugin.traefik-maintenance-plugin.redirectUrl=https://google.com"
+      - "traefik.http.middlewares.maintenance.plugin.traefik-maintenance-plugin.allowedIPs=0.0.0.0/0"
+      - "traefik.http.middlewares.maintenance.plugin.traefik-maintenance-plugin.debug=true"
     volumes:
       - ./test:/usr/share/nginx/html
     networks:

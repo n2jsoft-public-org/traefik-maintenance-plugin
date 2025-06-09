@@ -1,0 +1,36 @@
+
+version: "2"
+
+run:
+  timeout: 3m
+
+linters:
+  default: all
+  exclusions:
+    paths:
+      - ".*_test.go"
+  disable:
+    - wsl
+    - nlreturn
+    - varnamelen
+    - exhaustruct
+  settings:
+    revive:
+      rules:
+        - name: var-naming
+          disabled: true
+
+
+formatters:
+  enable:
+    - gci
+    - gofmt
+    - gofumpt
+    - goimports
+    - golines
+  exclusions:
+    paths:
+      - ".*_test.go"
+  settings:
+    golines:
+      max-len: 200
