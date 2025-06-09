@@ -2,15 +2,19 @@ package traefik_maintenance_plugin
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 )
 
 type Config struct {
 	RedirectURL string   `json:"redirectUrl,omitempty"`
 	AllowedIPs  []string `json:"allowedIPs,omitempty"`
+	Debug       bool     `json:"debug,omitempty"`
 }
 
 type IPWhitelistRedirect struct {
@@ -18,30 +22,31 @@ type IPWhitelistRedirect struct {
 	name        string
 	redirectURL string
 	allowedIPs  []net.IPNet
+	debug       bool
+	logger      *slog.Logger
 }
 
 func CreateConfig() *Config {
 	return &Config{
 		RedirectURL: "",
 		AllowedIPs:  []string{},
+		Debug:       false,
 	}
 }
 
-func New(ctx context.Context, next http.Handler, config *Config, name string) (http.Handler, error) {
+var ErrMissingRedirectURL = errors.New("redirectUrl is required")
+
+func New(_ context.Context, next http.Handler, config *Config, name string) (http.Handler, error) {
 	if config.RedirectURL == "" {
-		return nil, fmt.Errorf("redirectUrl is required")
+		return nil, ErrMissingRedirectURL
 	}
 
-	var allowedIPs []net.IPNet
+	allowedIPs := make([]net.IPNet, 0, len(config.AllowedIPs))
 	for _, ipStr := range config.AllowedIPs {
-		// Handle both single IPs and CIDR notation
 		if !strings.Contains(ipStr, "/") {
-			// Single IP - add appropriate subnet mask
 			if strings.Contains(ipStr, ":") {
-				// IPv6
 				ipStr += "/128"
 			} else {
-				// IPv4
 				ipStr += "/32"
 			}
 		}
@@ -53,55 +58,106 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 		allowedIPs = append(allowedIPs, *ipNet)
 	}
 
-	return &IPWhitelistRedirect{
+	loglevel := slog.LevelError
+	if config.Debug {
+		loglevel = slog.LevelDebug
+	}
+
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		Level: loglevel,
+	}))
+
+	plugin := &IPWhitelistRedirect{
 		next:        next,
 		name:        name,
 		redirectURL: config.RedirectURL,
 		allowedIPs:  allowedIPs,
-	}, nil
+		debug:       config.Debug,
+		logger:      logger,
+	}
+
+	if plugin.debug {
+		plugin.logger.Info("Plugin initialized with debug mode enabled",
+			"plugin", name,
+			"redirectURL", config.RedirectURL,
+			"allowedIPsCount", len(allowedIPs))
+		for i, ip := range allowedIPs {
+			plugin.logger.Debug("Allowed IP configured",
+				"plugin", name,
+				"index", i+1,
+				"network", ip.String())
+		}
+	}
+
+	return plugin, nil
 }
 
 func (i *IPWhitelistRedirect) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	clientIP := i.getClientIP(req)
 
-	// Check if client IP is in the allowed list
 	if i.isIPAllowed(clientIP) {
-		// IP is allowed, pass through to next handler
+		i.logger.Debug("IP allowed, passing request through",
+			"plugin", i.name, "clientIP", clientIP.String())
+
 		i.next.ServeHTTP(rw, req)
 		return
 	}
 
-	// IP not allowed, redirect to configured URL
+	i.logger.Debug("IP not allowed, redirecting",
+		"plugin", i.name,
+		"clientIP", clientIP.String(),
+		"redirectURL", i.redirectURL)
 	http.Redirect(rw, req, i.redirectURL, http.StatusFound)
 }
 
 func (i *IPWhitelistRedirect) getClientIP(req *http.Request) net.IP {
-	// Check X-Forwarded-For header first (most common with reverse proxies)
-	xff := req.Header.Get("X-Forwarded-For")
-	if xff != "" {
-		// X-Forwarded-For can contain multiple IPs, take the first one
-		ips := strings.Split(xff, ",")
-		if len(ips) > 0 {
-			ip := strings.TrimSpace(ips[0])
-			if parsedIP := net.ParseIP(ip); parsedIP != nil {
-				return parsedIP
-			}
-		}
+	// Try X-Forwarded-For
+	if ip := i.extractIPFromHeader(req, "X-Forwarded-For", true); ip != nil {
+		i.logger.Debug("Extracted IP from X-Forwarded-For header",
+			"plugin", i.name,
+			"ip", ip.String())
+		return ip
 	}
 
-	// Check X-Real-IP header
-	xri := req.Header.Get("X-Real-IP")
-	if xri != "" {
-		if parsedIP := net.ParseIP(xri); parsedIP != nil {
-			return parsedIP
-		}
+	// Try X-Real-IP
+	if ip := i.extractIPFromHeader(req, "X-Real-IP", false); ip != nil {
+		i.logger.Debug("Extracted IP from X-Real-IP header",
+			"plugin", i.name,
+			"ip", ip.String())
+		return ip
 	}
 
-	// Fall back to RemoteAddr
-	host, _, err := net.SplitHostPort(req.RemoteAddr)
+	// Fallback to RemoteAddr
+	ip := i.extractIPFromRemoteAddr(req.RemoteAddr)
+	i.logger.Debug("Extracted IP from RemoteAddr",
+		"plugin", i.name,
+		"ip", ip.String())
+	return ip
+}
+
+func (i *IPWhitelistRedirect) extractIPFromHeader(req *http.Request, header string, isList bool) net.IP {
+	value := req.Header.Get(header)
+	if value == "" {
+		return nil
+	}
+
+	var ipStr string
+	if isList {
+		parts := strings.Split(value, ",")
+		if len(parts) > 0 {
+			ipStr = strings.TrimSpace(parts[0])
+		}
+	} else {
+		ipStr = value
+	}
+
+	return net.ParseIP(ipStr)
+}
+
+func (i *IPWhitelistRedirect) extractIPFromRemoteAddr(remoteAddr string) net.IP {
+	host, _, err := net.SplitHostPort(remoteAddr)
 	if err != nil {
-		// If SplitHostPort fails, try parsing the whole string as IP
-		return net.ParseIP(req.RemoteAddr)
+		return net.ParseIP(remoteAddr)
 	}
 
 	return net.ParseIP(host)
@@ -114,9 +170,16 @@ func (i *IPWhitelistRedirect) isIPAllowed(ip net.IP) bool {
 
 	for _, allowedNet := range i.allowedIPs {
 		if allowedNet.Contains(ip) {
+			i.logger.Debug("IP matches is allowed",
+				"plugin", i.name,
+				"ip", ip.String(),
+				"network", allowedNet.String())
 			return true
 		}
 	}
 
+	i.logger.Debug("IP does not match any allowed networks",
+		"plugin", i.name,
+		"ip", ip.String())
 	return false
 }
