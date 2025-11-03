@@ -26,7 +26,7 @@ type IPWhitelistRedirect struct {
 	allowedIPs  []net.IPNet
 	debug       bool
 	logger      *slog.Logger
-	headers     []http.Header
+	headers     http.Header
 }
 
 func CreateConfig() *Config {
@@ -40,11 +40,7 @@ func CreateConfig() *Config {
 
 var ErrMissingRedirectURL = errors.New("redirectUrl is required")
 
-func New(_ context.Context, next http.Handler, config *Config, name string) (http.Handler, error) {
-	if config.RedirectURL == "" {
-		return nil, ErrMissingRedirectURL
-	}
-
+func getAllowedIPs(config *Config) ([]net.IPNet, error) {
 	allowedIPs := make([]net.IPNet, 0, len(config.AllowedIPs))
 	for _, ipStr := range config.AllowedIPs {
 		if !strings.Contains(ipStr, "/") {
@@ -61,6 +57,34 @@ func New(_ context.Context, next http.Handler, config *Config, name string) (htt
 		}
 		allowedIPs = append(allowedIPs, *ipNet)
 	}
+	return allowedIPs, nil
+}
+
+func getHeaders(config *Config) http.Header {
+	const headerParts = 2
+	headers := http.Header{}
+	for _, headerStr := range config.Headers {
+		parts := strings.SplitN(headerStr, ":", headerParts)
+		if len(parts) != headerParts {
+			continue
+		}
+
+		key := strings.TrimSpace(parts[0])
+		value := strings.TrimSpace(parts[1])
+		headers.Add(key, value)
+	}
+	return headers
+}
+
+func New(_ context.Context, next http.Handler, config *Config, name string) (http.Handler, error) {
+	if config.RedirectURL == "" {
+		return nil, ErrMissingRedirectURL
+	}
+
+	allowedIPs, err := getAllowedIPs(config)
+	if err != nil {
+		return nil, err
+	}
 
 	loglevel := slog.LevelError
 	if config.Debug {
@@ -71,22 +95,7 @@ func New(_ context.Context, next http.Handler, config *Config, name string) (htt
 		Level: loglevel,
 	}))
 
-	var headers []http.Header
-	for _, headerStr := range config.Headers {
-		header := http.Header{}
-		parts := strings.SplitN(headerStr, ":", 2)
-		if len(parts) != 2 {
-			logger.Warn("Invalid header format, skipping",
-				"plugin", name,
-				"header", headerStr)
-			continue
-		}
-
-		key := strings.TrimSpace(parts[0])
-		value := strings.TrimSpace(parts[1])
-		header[key] = []string{value}
-		headers = append(headers, header)
-	}
+	headers := getHeaders(config)
 
 	plugin := &IPWhitelistRedirect{
 		next:        next,
@@ -160,11 +169,9 @@ func (i *IPWhitelistRedirect) ServeHTTP(rw http.ResponseWriter, req *http.Reques
 	}
 
 	// Apply configured headers
-	for _, hdr := range i.headers {
-		for k, values := range hdr {
-			for _, v := range values {
-				rw.Header().Add(k, v)
-			}
+	for k, values := range i.headers {
+		for _, v := range values {
+			rw.Header().Add(k, v)
 		}
 	}
 
