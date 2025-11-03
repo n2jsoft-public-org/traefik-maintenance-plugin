@@ -1,6 +1,7 @@
 package traefik_maintenance_plugin
 
 import (
+	"context"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -13,7 +14,7 @@ func TestIsIPAllowed(t *testing.T) {
 		RedirectURL: "https://example.com/redirect",
 		AllowedIPs:  []string{"192.168.0.0/24", "10.0.0.1"},
 	}
-	handler, err := New(nil, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}), config, "test")
+	handler, err := New(context.TODO(), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}), config, "test")
 	if err != nil {
 		t.Fatalf("failed to create plugin: %v", err)
 	}
@@ -46,7 +47,7 @@ func TestGetClientIP(t *testing.T) {
 	config := &Config{
 		RedirectURL: "https://example.com",
 	}
-	handler, err := New(nil, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}), config, "test")
+	handler, err := New(context.TODO(), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}), config, "test")
 	if err != nil {
 		t.Fatalf("failed to create plugin: %v", err)
 	}
@@ -110,16 +111,17 @@ func TestServeHTTP(t *testing.T) {
 	nextCalled := false
 	nextHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		nextCalled = true
-		w.WriteHeader(http.StatusOK)
+		w.WriteHeader(http.StatusServiceUnavailable)
 		w.Write([]byte("next handler"))
 	})
 
 	config := &Config{
 		RedirectURL: redirectURL,
 		AllowedIPs:  []string{"192.168.1.0/24"},
+		Headers:     []string{"test:test"},
 	}
 
-	pluginHandler, err := New(nil, nextHandler, config, "test")
+	pluginHandler, err := New(context.TODO(), nextHandler, config, "test")
 	if err != nil {
 		t.Fatalf("failed to create plugin: %v", err)
 	}
@@ -137,8 +139,8 @@ func TestServeHTTP(t *testing.T) {
 		if !nextCalled {
 			t.Error("expected next handler to be called for allowed IP")
 		}
-		if rec.Code != http.StatusOK {
-			t.Errorf("expected status 200, got %d", rec.Code)
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Errorf("expected status %d, got %d", http.StatusServiceUnavailable, rec.Code)
 		}
 		if !strings.Contains(rec.Body.String(), "next handler") {
 			t.Errorf("unexpected response body: %s", rec.Body.String())
@@ -167,6 +169,9 @@ func TestServeHTTP(t *testing.T) {
 		}
 		if !strings.Contains(rec.Body.String(), "redirected content") {
 			t.Errorf("unexpected response body: %s", rec.Body.String())
+		}
+		if rec.Header().Get("test") != "test" {
+			t.Errorf("expected header 'test' to be set to 'test', got %v", rec.Header())
 		}
 	})
 }

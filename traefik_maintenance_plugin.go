@@ -16,6 +16,7 @@ type Config struct {
 	RedirectURL string   `json:"redirectUrl,omitempty"`
 	AllowedIPs  []string `json:"allowedIPs,omitempty"`
 	Debug       bool     `json:"debug,omitempty"`
+	Headers     []string `json:"headers,omitempty"`
 }
 
 type IPWhitelistRedirect struct {
@@ -25,23 +26,21 @@ type IPWhitelistRedirect struct {
 	allowedIPs  []net.IPNet
 	debug       bool
 	logger      *slog.Logger
+	headers     http.Header
 }
 
 func CreateConfig() *Config {
 	return &Config{
 		RedirectURL: "",
 		AllowedIPs:  []string{},
+		Headers:     []string{},
 		Debug:       false,
 	}
 }
 
 var ErrMissingRedirectURL = errors.New("redirectUrl is required")
 
-func New(_ context.Context, next http.Handler, config *Config, name string) (http.Handler, error) {
-	if config.RedirectURL == "" {
-		return nil, ErrMissingRedirectURL
-	}
-
+func getAllowedIPs(config *Config) ([]net.IPNet, error) {
 	allowedIPs := make([]net.IPNet, 0, len(config.AllowedIPs))
 	for _, ipStr := range config.AllowedIPs {
 		if !strings.Contains(ipStr, "/") {
@@ -58,6 +57,34 @@ func New(_ context.Context, next http.Handler, config *Config, name string) (htt
 		}
 		allowedIPs = append(allowedIPs, *ipNet)
 	}
+	return allowedIPs, nil
+}
+
+func getHeaders(config *Config) http.Header {
+	const headerParts = 2
+	headers := http.Header{}
+	for _, headerStr := range config.Headers {
+		parts := strings.SplitN(headerStr, ":", headerParts)
+		if len(parts) != headerParts {
+			continue
+		}
+
+		key := strings.TrimSpace(parts[0])
+		value := strings.TrimSpace(parts[1])
+		headers.Add(key, value)
+	}
+	return headers
+}
+
+func New(_ context.Context, next http.Handler, config *Config, name string) (http.Handler, error) {
+	if config.RedirectURL == "" {
+		return nil, ErrMissingRedirectURL
+	}
+
+	allowedIPs, err := getAllowedIPs(config)
+	if err != nil {
+		return nil, err
+	}
 
 	loglevel := slog.LevelError
 	if config.Debug {
@@ -68,6 +95,8 @@ func New(_ context.Context, next http.Handler, config *Config, name string) (htt
 		Level: loglevel,
 	}))
 
+	headers := getHeaders(config)
+
 	plugin := &IPWhitelistRedirect{
 		next:        next,
 		name:        name,
@@ -75,6 +104,7 @@ func New(_ context.Context, next http.Handler, config *Config, name string) (htt
 		allowedIPs:  allowedIPs,
 		debug:       config.Debug,
 		logger:      logger,
+		headers:     headers,
 	}
 
 	if plugin.debug {
@@ -130,12 +160,27 @@ func (i *IPWhitelistRedirect) ServeHTTP(rw http.ResponseWriter, req *http.Reques
 				"plugin", i.name, "error", err)
 		}
 	}()
+
+	// Copy headers from the fetched response
+	for k, values := range resp.Header {
+		for _, v := range values {
+			rw.Header().Add(k, v)
+		}
+	}
+
+	// Apply configured headers
+	for k, values := range i.headers {
+		for _, v := range values {
+			rw.Header().Add(k, v)
+		}
+	}
+
 	rw.WriteHeader(resp.StatusCode)
+
 	_, err = io.Copy(rw, resp.Body)
 	if err != nil {
 		i.logger.Error("Failed to write response body",
 			"plugin", i.name, "error", err)
-		http.Error(rw, "Unable to write response", http.StatusInternalServerError)
 		return
 	}
 }

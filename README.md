@@ -27,6 +27,9 @@ http:
             - "10.0.0.0/8"
             - "2001:db8::/32"
           debug: true
+          headers:
+            - "X-Maintenance-Mode: true"
+            - "Cache-Control: no-cache, no-store, must-revalidate"
 ```
 
 ## Development & Testing
